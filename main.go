@@ -438,9 +438,10 @@ func (bc *Blockchain) GetBalance(address string) int {
 	return balance
 }
 
-// FindTransaction searches and retrieves a specific transaction record by its unique ID string.
-func (bc *Blockchain) FindTransaction(ID string) (Transaction, error) {
-	bc.Db.View(func(tx *bbolt.Tx) error {
+// FindTransactionByHash searches and retrieves a specific transaction record structure by its ID.
+func (bc *Blockchain) FindTransactionByHash(ID string) (Transaction, error) {
+	var foundTx Transaction
+	err := bc.Db.View(func(tx *bbolt.Tx) error {
 		b := tx.Bucket([]byte(blocksBucket))
 		cursor := b.Cursor()
 
@@ -449,18 +450,22 @@ func (bc *Blockchain) FindTransaction(ID string) (Transaction, error) {
 				continue
 			}
 			block := deserializeBlock(v)
-			for _, tx := range block.Transactions {
-				if tx.ID == ID {
+			for _, t := range block.Transactions {
+				if t.ID == ID {
+					foundTx = *t
 					return nil
 				}
 			}
 		}
-		return nil
+		return errors.New("transaction not found")
 	})
-	return Transaction{}, errors.New("transaction not found")
+	if err != nil {
+		return Transaction{}, err
+	}
+	return foundTx, nil
 }
 
-// NewUTXOTransaction builds and verifies a balanced value transfer transaction between wallets.
+// NewUTXOTransaction builds, signs, and verifies a balanced value transfer transaction between wallets.
 func NewUTXOTransaction(walletSender *wallet.Wallet, recipient string, amount int, bc *Blockchain) (*Transaction, error) {
 	var inputs []TXInput
 	var outputs []TXOutput
@@ -472,8 +477,14 @@ func NewUTXOTransaction(walletSender *wallet.Wallet, recipient string, amount in
 		return nil, errors.New("error: insufficient funds")
 	}
 
+	prevTxs := make(map[string]*Transaction)
+
 	for txid, outs := range validOutputs {
 		for _, outIdx := range outs {
+			tx, err := bc.FindTransactionByHash(txid)
+			if err == nil {
+				prevTxs[txid] = &tx
+			}
 			input := TXInput{Txid: txid, Vout: outIdx, Signature: nil, PubKey: walletSender.PublicKey}
 			inputs = append(inputs, input)
 		}
@@ -486,6 +497,9 @@ func NewUTXOTransaction(walletSender *wallet.Wallet, recipient string, amount in
 
 	tx := Transaction{ID: "", Vin: inputs, Vout: outputs}
 	tx.ID = tx.Hash()
+	
+	// Sign the transaction using the sender's wallet credentials
+	tx.Sign(walletSender, prevTxs)
 
 	return &tx, nil
 }
@@ -505,8 +519,38 @@ func (bc *Blockchain) MineBlock(transactions []*Transaction, minerAddress string
 		return nil
 	})
 
+	var validTransactions []*Transaction
+	prevTxs := make(map[string]*Transaction)
+
+	bc.Db.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte(blocksBucket))
+		cursor := b.Cursor()
+		for k, v := cursor.First(); k != nil; k, v = cursor.Next() {
+			if string(k) == "l" {
+				continue
+			}
+			block := deserializeBlock(v)
+			for _, t := range block.Transactions {
+				prevTxs[t.ID] = t
+			}
+		}
+		return nil
+	})
+
+	for _, tx := range transactions {
+		if tx.IsCoinbase() {
+			validTransactions = append(validTransactions, tx)
+			continue
+		}
+		if tx.Verify(prevTxs) {
+			validTransactions = append(validTransactions, tx)
+		} else {
+			fmt.Printf("[Mempool] Transaction verification failed for ID: %s. Dropping.\n", tx.ID)
+		}
+	}
+
 	cbtx := NewCoinbaseTX(minerAddress, "")
-	allTransactions := append([]*Transaction{cbtx}, transactions...)
+	allTransactions := append([]*Transaction{cbtx}, validTransactions...)
 
 	newBlock := &Block{
 		Timestamp:     time.Now().Unix(),
