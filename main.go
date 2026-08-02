@@ -178,7 +178,7 @@ func (tx *Transaction) Sign(w *wallet.Wallet, prevTxs map[string]*Transaction) {
 
 	for inID, vin := range tx.Vin {
 		prevTx := prevTxs[vin.Txid]
-		txCopy.Vin[inID].PubKey = prevTx.Vout[vin.Vout].ScriptPubKey
+		txCopy.Vin[inID].PubKey = []byte(prevTx.Vout[vin.Vout].ScriptPubKey)
 		txCopy.ID = txCopy.Hash()
 		txCopy.Vin[inID].PubKey = nil
 
@@ -198,7 +198,7 @@ func (tx *Transaction) Verify(prevTxs map[string]*Transaction) bool {
 
 	for inID, vin := range tx.Vin {
 		prevTx := prevTxs[vin.Txid]
-		txCopy.Vin[inID].PubKey = prevTx.Vout[vin.Vout].ScriptPubKey
+		txCopy.Vin[inID].PubKey = []byte(prevTx.Vout[vin.Vout].ScriptPubKey)
 		txCopy.ID = txCopy.Hash()
 		txCopy.Vin[inID].PubKey = nil
 
