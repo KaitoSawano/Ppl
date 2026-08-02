@@ -1,35 +1,75 @@
-// Package core handles the core blockchain logic including Proof-of-Work and Block management.
+// Package core handles the core blockchain logic including Proof-of-Work, Block management, and BoltDB storage.
 package core
 
 import (
 	"blockchain/transaction"
+	"bytes"
+	"encoding/gob"
 	"fmt"
+	"log"
 	"time"
+
+	"go.etcd.io/bbolt"
 )
 
-// Blockchain represents the main chain structure along with the local UTXO database set.
+// Blockchain represents the blockchain database and the tip (hash of the latest block).
 type Blockchain struct {
-	Blocks  []*Block
-	UTXOSet map[string]transaction.TXOutput
+	Tip []byte
+	Db  *bbolt.DB
 }
 
-// NewBlockchain creates a new blockchain instance and mines the Genesis Block (Block 0).
-func NewBlockchain(genesisAddress string) *Blockchain {
-	bc := &Blockchain{
-		Blocks:  []*Block{},
-		UTXOSet: make(map[string]transaction.TXOutput),
+// Block represents a single block structure linked within the blockchain.
+type Block struct {
+	Timestamp     int64
+	Transactions  []*transaction.Transaction
+	PrevBlockHash string
+	Hash          string
+	Nonce         int
+	Height        int
+}
+
+// CreateBlockchain creates a new blockchain DB, mines the Genesis Block, and stores it.
+func CreateBlockchain(genesisAddress string) *Blockchain {
+	dbFile := "blockchain.db"
+	db, err := bbolt.Open(dbFile, 0600, nil)
+	if err != nil {
+		log.Panic(err)
 	}
 
-	cbtx := transaction.NewCoinbaseTX(genesisAddress, "Genesis Block - Initializing Network")
-	genesisBlock := bc.CreateGenesisBlock(cbtx)
-	bc.Blocks = append(bc.Blocks, genesisBlock)
-	bc.updateUTXOSet(genesisBlock)
+	var tip []byte
 
-	return bc
+	err = db.Update(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte("blocks"))
+		if b == nil {
+			cbtx := transaction.NewCoinbaseTX(genesisAddress, "Genesis Block - Initializing Network")
+			genesis := NewGenesisBlock(cbtx)
+			b, err := tx.CreateBucket([]byte("blocks"))
+			if err != nil {
+				log.Panic(err)
+			}
+			err = b.Put([]byte(genesis.Hash), genesis.Serialize())
+			if err != nil {
+				log.Panic(err)
+			}
+			err = b.Put([]byte("l"), []byte(genesis.Hash))
+			if err != nil {
+				log.Panic(err)
+			}
+			tip = []byte(genesis.Hash)
+		} else {
+			tip = b.Get([]byte("l"))
+		}
+		return nil
+	})
+	if err != nil {
+		log.Panic(err)
+	}
+
+	return &Blockchain{Tip: tip, Db: db}
 }
 
-// CreateGenesisBlock mines and returns the first block (Genesis Block) in the network.
-func (bc *Blockchain) CreateGenesisBlock(coinbase *transaction.Transaction) *Block {
+// NewGenesisBlock creates and returns the first block (Genesis Block).
+func NewGenesisBlock(coinbase *transaction.Transaction) *Block {
 	block := &Block{
 		Timestamp:     time.Now().Unix(),
 		Transactions:  []*transaction.Transaction{coinbase},
@@ -43,20 +83,31 @@ func (bc *Blockchain) CreateGenesisBlock(coinbase *transaction.Transaction) *Blo
 	return block
 }
 
-// MineBlock processes and mines a new block using pending transactions from the mempool.
+// MineBlock mines a new block containing pending transactions from the mempool and saves it to BoltDB.
 func (bc *Blockchain) MineBlock(mempool *Mempool, minerAddress string) *Block {
-	// Ambil semua transaksi tertunda yang ada di mempool
 	pendingTxs := mempool.GetAll()
 
 	cbtx := transaction.NewCoinbaseTX(minerAddress, "")
 	allTransactions := append([]*transaction.Transaction{cbtx}, pendingTxs...)
 
-	prevBlock := bc.Blocks[len(bc.Blocks)-1]
+	var lastHeight int
+	var lastHash string
+
+	bc.Db.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte("blocks"))
+		lastHashBytes := b.Get([]byte("l"))
+		blockData := b.Get(lastHashBytes)
+		lastBlock := DeserializeBlock(blockData)
+		lastHeight = lastBlock.Height
+		lastHash = lastBlock.Hash
+		return nil
+	})
+
 	newBlock := &Block{
 		Timestamp:     time.Now().Unix(),
 		Transactions:  allTransactions,
-		PrevBlockHash: prevBlock.Hash,
-		Height:        prevBlock.Height + 1,
+		PrevBlockHash: lastHash,
+		Height:        lastHeight + 1,
 	}
 
 	pow := NewProofOfWork(newBlock)
@@ -64,63 +115,183 @@ func (bc *Blockchain) MineBlock(mempool *Mempool, minerAddress string) *Block {
 	newBlock.Nonce = nonce
 	newBlock.Hash = hash
 
-	bc.Blocks = append(bc.Blocks, newBlock)
-	bc.updateUTXOSet(newBlock)
+	bc.Db.Update(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte("blocks"))
+		err := b.Put([]byte(newBlock.Hash), newBlock.Serialize())
+		if err != nil {
+			log.Panic(err)
+		}
+		err = b.Put([]byte("l"), []byte(newBlock.Hash))
+		if err != nil {
+			log.Panic(err)
+		}
+		bc.Tip = []byte(newBlock.Hash)
+		return nil
+	})
 
-	// Bersihkan transaksi yang sudah sukses dimasukkan ke dalam blok dari mempool
 	mempool.Clear(pendingTxs)
+	fmt.Printf("[PoW] Mining block at height %d (Difficulty: 12)...\n", newBlock.Height)
+	fmt.Println("Success! Block mined.")
 
 	return newBlock
 }
 
-// updateUTXOSet updates the local UTXO database status by removing spent inputs and adding new outputs.
-func (bc *Blockchain) updateUTXOSet(block *Block) {
-	for _, tx := range block.Transactions {
-		if !tx.IsCoinbase() {
-			for _, in := range tx.Vin {
-				key := fmt.Sprintf("%s_%d", in.Txid, in.Vout)
-				delete(bc.UTXOSet, key)
-			}
-		}
-		for outIdx, out := range tx.Vout {
-			key := fmt.Sprintf("%s_%d", tx.ID, outIdx)
-			bc.UTXOSet[key] = out
-		}
+// Serialize converts a Block into a byte slice.
+func (b *Block) Serialize() []byte {
+	var result bytes.Buffer
+	encoder := gob.NewEncoder(&result)
+	err := encoder.Encode(b)
+	if err != nil {
+		log.Panic(err)
 	}
+	return result.Bytes()
 }
 
-// GetBalance calculates the total accumulated unspent coin balance for a specific address.
+// DeserializeBlock converts a byte slice back into a Block instance.
+func DeserializeBlock(d []byte) *Block {
+	var block Block
+	decoder := gob.NewDecoder(bytes.NewReader(d))
+	err := decoder.Decode(&block)
+	if err != nil {
+		log.Panic(err)
+	}
+	return &block
+}
+
+// GetBalance calculates the total unspent balance for an address by scanning all blocks in the database.
 func (bc *Blockchain) GetBalance(address string) int {
 	balance := 0
-	for _, out := range bc.UTXOSet {
-		if out.ScriptPubKey == address {
-			balance += out.Value
-		}
+	UTXOs := bc.FindUTXO(address)
+
+	for _, out := range UTXOs {
+		balance += out.Value
 	}
 	return balance
 }
 
-// FindSpendableOutputs finds unspent outputs for an address until the required amount is met.
-func (bc *Blockchain) FindSpendableOutputs(address string, amount int) (int, map[string]int) {
-	unspentOutputs := make(map[string]int)
-	accumulated := 0
+// FindUTXO finds all unspent transaction outputs for a specific address.
+func (bc *Blockchain) FindUTXO(address string) []transaction.TXOutput {
+	var unspentUTXOs []transaction.TXOutput
+	spentTXOs := make(map[string][]int)
 
-	for txid, out := range bc.UTXOSet {
-		if out.ScriptPubKey == address {
-			accumulated += out.Value
-			var realTxid string
-			var vout int
-			_, _ = fmt.Sscanf(txid, "%s_%d", &realTxid, &vout)
-			unspentOutputs[realTxid] = vout
-			if accumulated >= amount {
-				break
+	bc.Db.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte("blocks"))
+		cursor := b.Cursor()
+
+		for k, v := cursor.First(); k != nil; k, v = cursor.Next() {
+			if string(k) == "l" {
+				continue
+			}
+			block := DeserializeBlock(v)
+
+			for _, tx := range block.Transactions {
+				txID := tx.ID
+
+				if !tx.IsCoinbase() {
+					for _, in := range tx.Vin {
+						spentTXOs[in.Txid] = append(spentTXOs[in.Txid], in.Vout)
+					}
+				}
 			}
 		}
-	}
+
+		for k, v := cursor.First(); k != nil; k, v = cursor.Next() {
+			if string(k) == "l" {
+				continue
+			}
+			block := DeserializeBlock(v)
+
+			for _, tx := range block.Transactions {
+				txID := tx.ID
+
+				for outIdx, out := range tx.Vout {
+					if out.ScriptPubKey == address {
+						isSpent := false
+						if spentTXOs[txID] != nil {
+							for _, spentOutIdx := range spentTXOs[txID] {
+								if spentOutIdx == outIdx {
+									isSpent = true
+									break
+								}
+							}
+						}
+						if !isSpent {
+							unspentUTXOs = append(unspentUTXOs, out)
+						}
+					}
+				}
+			}
+		}
+		return nil
+	})
+
+	return unspentUTXOs
+}
+
+// FindSpendableOutputs finds spendable outputs and accumulates enough value for a transaction.
+func (bc *Blockchain) FindSpendableOutputs(address string, amount int) (int, map[string][]int) {
+	unspentOutputs := make(map[string][]int)
+	accumulated := 0
+	spentTXOs := make(map[string][]int)
+
+	bc.Db.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte("blocks"))
+		cursor := b.Cursor()
+
+		for k, v := cursor.First(); k != nil; k, v = cursor.Next() {
+			if string(k) == "l" {
+				continue
+			}
+			block := DeserializeBlock(v)
+
+			for _, tx := range block.Transactions {
+				if !tx.IsCoinbase() {
+					for _, in := range tx.Vin {
+						spentTXOs[in.Txid] = append(spentTXOs[in.Txid], in.Vout)
+					}
+				}
+			}
+		}
+
+		for k, v := cursor.First(); k != nil; k, v = cursor.Next() {
+			if string(k) == "l" {
+				continue
+			}
+			block := DeserializeBlock(v)
+
+			for _, tx := range block.Transactions {
+				txID := tx.ID
+
+				for outIdx, out := range tx.Vout {
+					if out.ScriptPubKey == address {
+						isSpent := false
+						if spentTXOs[txID] != nil {
+							for _, spentOutIdx := range spentTXOs[txID] {
+								if spentOutIdx == outIdx {
+									isSpent = true
+									break
+								}
+							}
+						}
+
+						if !isSpent {
+							accumulated += out.Value
+							unspentOutputs[txID] = append(unspentOutputs[txID], outIdx)
+							if accumulated >= amount {
+								return nil
+							}
+						}
+					}
+				}
+			}
+		}
+		return nil
+	})
+
 	return accumulated, unspentOutputs
 }
 
-// NewUTXOTransaction creates a new transaction from sender to recipient with change handling.
+// NewUTXOTransaction creates a new transaction from sender to recipient with proper UTXO tracking.
 func (bc *Blockchain) NewUTXOTransaction(from, to string, amount int) (*transaction.Transaction, error) {
 	var inputs []transaction.TXInput
 	var outputs []transaction.TXOutput
@@ -131,16 +302,14 @@ func (bc *Blockchain) NewUTXOTransaction(from, to string, amount int) (*transact
 		return nil, fmt.Errorf("error: insufficient funds")
 	}
 
-	// Build inputs
-	for txid, vout := range validOutputs {
-		input := transaction.TXInput{Txid: txid, Vout: vout, Signature: nil, PubKey: []byte(from)}
-		inputs = append(inputs, input)
+	for txid, outs := range validOutputs {
+		for _, out := range outs {
+			input := transaction.TXInput{Txid: txid, Vout: out, Signature: nil, PubKey: []byte(from)}
+			inputs = append(inputs, input)
+		}
 	}
 
-	// Build a recipient output
 	outputs = append(outputs, transaction.TXOutput{Value: amount, ScriptPubKey: to})
-
-	// Build a change output if there is leftover balance
 	if acc > amount {
 		outputs = append(outputs, transaction.TXOutput{Value: acc - amount, ScriptPubKey: from})
 	}

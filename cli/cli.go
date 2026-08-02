@@ -39,6 +39,13 @@ func (cli *CLI) validateArgs() {
 	}
 }
 
+// createBlockchain initializes a new blockchain database and generates the genesis block.
+func (cli *CLI) createBlockchain(address string) {
+	bc := core.CreateBlockchain(address)
+	defer bc.Db.Close()
+	fmt.Println("Done! Genesis block created.")
+}
+
 // getBalance retrieves and prints the unspent coin balance for a specific address from the database.
 func (cli *CLI) getBalance(address string) {
 	db, err := bbolt.Open("blockchain.db", 0600, nil)
@@ -146,12 +153,14 @@ func (cli *CLI) mine(minerAddress string) {
 func (cli *CLI) Run() {
 	cli.validateArgs()
 
+	createblockchainCmd := flag.NewFlagSet("createblockchain", flag.ExitOnError)
 	getbalanceCmd := flag.NewFlagSet("getbalance", flag.ExitOnError)
 	createwalletCmd := flag.NewFlagSet("createwallet", flag.ExitOnError)
 	printchainCmd := flag.NewFlagSet("printchain", flag.ExitOnError)
 	mineCmd := flag.NewFlagSet("mine", flag.ExitOnError)
 	sendCmd := flag.NewFlagSet("send", flag.ExitOnError)
 
+	createBlockchainAddress := createblockchainCmd.String("address", "", "The address to send genesis reward to")
 	getBalanceAddress := getbalanceCmd.String("address", "", "The address to get balance for")
 	mineMiner := mineCmd.String("miner", "", "Miner address to receive block reward")
 	sendFrom := sendCmd.String("from", "", "Source wallet address")
@@ -160,6 +169,8 @@ func (cli *CLI) Run() {
 
 	// Match and parse specific command flags
 	switch os.Args[1] {
+	case "createblockchain":
+		_ = createblockchainCmd.Parse(os.Args[2:])
 	case "getbalance":
 		_ = getbalanceCmd.Parse(os.Args[2:])
 	case "createwallet":
@@ -176,6 +187,14 @@ func (cli *CLI) Run() {
 	}
 
 	// Execute respective actions based on parsed flags
+	if createblockchainCmd.Parsed() {
+		if *createBlockchainAddress == "" {
+			createblockchainCmd.Usage()
+			os.Exit(1)
+		}
+		cli.createBlockchain(*createBlockchainAddress)
+	}
+
 	if getbalanceCmd.Parsed() {
 		if *getBalanceAddress == "" {
 			getbalanceCmd.Usage()
