@@ -298,7 +298,7 @@ func CreateBlockchain(address string) *Blockchain {
 		}
 		tip = []byte(genesis.Hash)
 		return nil
-	}
+	})
 	if err != nil {
 		log.Panic(err)
 	}
@@ -315,7 +315,7 @@ func CreateGenesisBlock(coinbase *Transaction) *Block {
 		Height:        0,
 		Difficulty:    InitialDifficulty,
 	}
-	pow := NewProofOfWork(block}
+	pow := NewProofOfWork(block)
 	nonce, hash := pow.Run()
 	block.Nonce = nonce
 	block.Hash = hash
