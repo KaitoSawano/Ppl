@@ -99,3 +99,53 @@ func (bc *Blockchain) GetBalance(address string) int {
 	}
 	return balance
 }
+
+// FindSpendableOutputs finds unspent outputs for an address until the required amount is met.
+func (bc *Blockchain) FindSpendableOutputs(address string, amount int) (int, map[string]int) {
+	unspentOutputs := make(map[string]int)
+	accumulated := 0
+
+	for txid, out := range bc.UTXOSet {
+		if out.ScriptPubKey == address {
+			accumulated += out.Value
+			var realTxid string
+			var vout int
+			_, _ = fmt.Sscanf(txid, "%s_%d", &realTxid, &vout)
+			unspentOutputs[realTxid] = vout
+			if accumulated >= amount {
+				break
+			}
+		}
+	}
+	return accumulated, unspentOutputs
+}
+
+// NewUTXOTransaction creates a new transaction from sender to recipient with change handling.
+func (bc *Blockchain) NewUTXOTransaction(from, to string, amount int) (*transaction.Transaction, error) {
+	var inputs []transaction.TXInput
+	var outputs []transaction.TXOutput
+
+	acc, validOutputs := bc.FindSpendableOutputs(from, amount)
+
+	if acc < amount {
+		return nil, fmt.Errorf("error: insufficient funds")
+	}
+
+	// Build inputs
+	for txid, vout := range validOutputs {
+		input := transaction.TXInput{Txid: txid, Vout: vout, Signature: nil, PubKey: []byte(from)}
+		inputs = append(inputs, input)
+	}
+
+	// Build a recipient output
+	outputs = append(outputs, transaction.TXOutput{Value: amount, ScriptPubKey: to})
+
+	// Build a change output if there is leftover balance
+	if acc > amount {
+		outputs = append(outputs, transaction.TXOutput{Value: acc - amount, ScriptPubKey: from})
+	}
+
+	tx := &transaction.Transaction{ID: "", Vin: inputs, Vout: outputs}
+	tx.ID = tx.Hash()
+	return tx, nil
+}
