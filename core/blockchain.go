@@ -185,12 +185,20 @@ func (bc *Blockchain) FindUTXO(address string) []transaction.TXOutput {
 			block := DeserializeBlock(v)
 
 			for _, tx := range block.Transactions {
-				txID := tx.ID
-
 				if !tx.IsCoinbase() {
 					for _, in := range tx.Vin {
 						spentTXOs[in.Txid] = append(spentTXOs[in.Txid], in.Vout)
 					}
+				}
+			}
+		}
+
+		mempool := NewMempool(bc.Db)
+		pendingTxs := mempool.GetAll()
+		for _, tx := range pendingTxs {
+			if !tx.IsCoinbase() {
+				for _, in := range tx.Vin {
+					spentTXOs[in.Txid] = append(spentTXOs[in.Txid], in.Vout)
 				}
 			}
 		}
@@ -222,6 +230,27 @@ func (bc *Blockchain) FindUTXO(address string) []transaction.TXOutput {
 				}
 			}
 		}
+
+		for _, tx := range pendingTxs {
+			txID := tx.ID
+			for outIdx, out := range tx.Vout {
+				if out.ScriptPubKey == address {
+					isSpent := false
+					if spentTXOs[txID] != nil {
+						for _, spentOutIdx := range spentTXOs[txID] {
+							if spentOutIdx == outIdx {
+								isSpent = true
+								break
+							}
+						}
+					}
+					if !isSpent {
+						unspentUTXOs = append(unspentUTXOs, out)
+					}
+				}
+			}
+		}
+
 		return nil
 	})
 
@@ -249,6 +278,16 @@ func (bc *Blockchain) FindSpendableOutputs(address string, amount int) (int, map
 					for _, in := range tx.Vin {
 						spentTXOs[in.Txid] = append(spentTXOs[in.Txid], in.Vout)
 					}
+				}
+			}
+		}
+
+		mempool := NewMempool(bc.Db)
+		pendingTxs := mempool.GetAll()
+		for _, tx := range pendingTxs {
+			if !tx.IsCoinbase() {
+				for _, in := range tx.Vin {
+					spentTXOs[in.Txid] = append(spentTXOs[in.Txid], in.Vout)
 				}
 			}
 		}
@@ -285,6 +324,32 @@ func (bc *Blockchain) FindSpendableOutputs(address string, amount int) (int, map
 				}
 			}
 		}
+
+		for _, tx := range pendingTxs {
+			txID := tx.ID
+			for outIdx, out := range tx.Vout {
+				if out.ScriptPubKey == address {
+					isSpent := false
+					if spentTXOs[txID] != nil {
+						for _, spentOutIdx := range spentTXOs[txID] {
+							if spentOutIdx == outIdx {
+								isSpent = true
+								break
+							}
+						}
+					}
+
+					if !isSpent {
+						accumulated += out.Value
+						unspentOutputs[txID] = append(unspentOutputs[txID], outIdx)
+						if accumulated >= amount {
+							return nil
+						}
+					}
+				}
+			}
+		}
+
 		return nil
 	})
 

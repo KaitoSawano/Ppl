@@ -24,9 +24,9 @@ func NewCLI() *CLI {
 func (cli *CLI) printUsage() {
 	fmt.Println("Usage:")
 	fmt.Println("  createblockchain -address <ADDRESS>   - Create a blockchain and send genesis reward")
-	fmt.Println("  createwallet                          - Generates a new wallet address")
+	fmt.Println("  createwallet                         - Generates a new wallet address")
 	fmt.Println("  getbalance -address <ADDRESS>         - Get balance of an address")
-	fmt.Println("  printchain                            - Print all blocks of the blockchain")
+	fmt.Println("  printchain                           - Print all blocks of the blockchain")
 	fmt.Println("  mine -miner <ADDRESS>                 - Mine a new block with pending mempool txs")
 	fmt.Println("  send -from <FROM> -to <TO> -amount <AMOUNT> - Send coins from one address to another")
 }
@@ -57,7 +57,9 @@ func (cli *CLI) getBalance(address string) {
 	var tip []byte
 	db.View(func(tx *bbolt.Tx) error {
 		b := tx.Bucket([]byte("blocks"))
-		tip = b.Get([]byte("l"))
+		if b != nil {
+			tip = b.Get([]byte("l"))
+		}
 		return nil
 	})
 
@@ -70,7 +72,7 @@ func (cli *CLI) getBalance(address string) {
 func (cli *CLI) createWallet() {
 	w := wallet.NewWallet()
 	fmt.Printf("New Wallet Generated!\n")
-	fmt.Printf("Address : %s\n", w.GetAddress())
+	fmt.Printf("Address: %s\n", w.GetAddress())
 }
 
 // printChain iterates through and prints details of all blocks currently stored in the blockchain.
@@ -83,6 +85,9 @@ func (cli *CLI) printChain() {
 
 	db.View(func(tx *bbolt.Tx) error {
 		b := tx.Bucket([]byte("blocks"))
+		if b == nil {
+			return nil
+		}
 		cursor := b.Cursor()
 		for k, v := cursor.First(); k != nil; k, v = cursor.Next() {
 			if string(k) == "l" {
@@ -90,7 +95,6 @@ func (cli *CLI) printChain() {
 			}
 			block := core.DeserializeBlock(v)
 			fmt.Printf("Block Height : %d\n", block.Height)
-			fmt.Printf("Difficulty   : %d\n", block.Difficulty)
 			fmt.Printf("Prev. Hash   : %s\n", block.PrevBlockHash)
 			fmt.Printf("Block Hash   : %s\n", block.Hash)
 			fmt.Printf("Nonce        : %d\n", block.Nonce)
@@ -112,7 +116,9 @@ func (cli *CLI) send(from, to string, amount int) {
 	var tip []byte
 	db.View(func(tx *bbolt.Tx) error {
 		b := tx.Bucket([]byte("blocks"))
-		tip = b.Get([]byte("l"))
+		if b != nil {
+			tip = b.Get([]byte("l"))
+		}
 		return nil
 	})
 
@@ -139,7 +145,9 @@ func (cli *CLI) mine(minerAddress string) {
 	var tip []byte
 	db.View(func(tx *bbolt.Tx) error {
 		b := tx.Bucket([]byte("blocks"))
-		tip = b.Get([]byte("l"))
+		if b != nil {
+			tip = b.Get([]byte("l"))
+		}
 		return nil
 	})
 
