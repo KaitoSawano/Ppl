@@ -1,57 +1,94 @@
+// Package core handles the core blockchain logic including Proof-of-Work and Block management.
 package core
 
 import (
 	"blockchain/transaction"
-	"sync"
+	"bytes"
+	"encoding/json"
+	"go.etcd.io/bbolt"
+	"log"
 )
 
-// Mempool manages pending transactions waiting to be mined into a block.
+const mempoolBucket = "mempool"
+
+// Mempool manages pending transactions stored persistently in the database.
 type Mempool struct {
-	mu           sync.Mutex
-	transactions map[string]*transaction.Transaction
+	db *bbolt.DB
 }
 
-// NewMempool initializes and returns a new Mempool instance.
-func NewMempool() *Mempool {
-	return &Mempool{
-		transactions: make(map[string]*transaction.Transaction),
+// NewMempool initializes a Mempool instance tied to the bbolt database.
+func NewMempool(db *bbolt.DB) *Mempool {
+	// Ensure the mempool bucket exists
+	err := db.Update(func(tx *bbolt.Tx) error {
+		_, err := tx.CreateBucketIfNotExists([]byte(mempoolBucket))
+		return err
+	})
+	if err != nil {
+		log.Panic(err)
 	}
+
+	return &Mempool{db: db}
 }
 
-// Add adds a new transaction to the mempool.
+// Add stores a new transaction persistently into the mempool bucket.
 func (mp *Mempool) Add(tx *transaction.Transaction) {
-	mp.mu.Lock()
-	defer mp.mu.Unlock()
-	mp.transactions[tx.ID] = tx
+	err := mp.db.Update(func(bTx *bbolt.Tx) error {
+		b := bTx.Bucket([]byte(mempoolBucket))
+		var encoded bytes.Buffer
+		enc := json.NewEncoder(&encoded)
+		_ = enc.Encode(tx)
+		return b.Put([]byte(tx.ID), encoded.Bytes())
+	})
+	if err != nil {
+		log.Panic(err)
+	}
 }
 
-// GetAll returns all pending transactions currently in the mempool.
+// GetAll retrieves all pending transactions currently stored in the mempool database.
 func (mp *Mempool) GetAll() []*transaction.Transaction {
-	mp.mu.Lock()
-	defer mp.mu.Unlock()
-
 	var txs []*transaction.Transaction
-	for _, tx := range mp.transactions {
-		txs = append(txs, tx)
+
+	err := mp.db.View(func(bTx *bbolt.Tx) error {
+		b := bTx.Bucket([]byte(mempoolBucket))
+		cursor := b.Cursor()
+		for k, v := cursor.First(); k != nil; k, v = cursor.Next() {
+			var tx transaction.Transaction
+			dec := json.NewDecoder(bytes.NewReader(v))
+			_ = dec.Decode(&tx)
+			txs = append(txs, &tx)
+		}
+		return nil
+	})
+	if err != nil {
+		log.Panic(err)
 	}
+
 	return txs
 }
 
-// Clear removes mined transactions from the mempool.
+// Clear removes successfully mined transactions from the mempool database.
 func (mp *Mempool) Clear(minedTxs []*transaction.Transaction) {
-	mp.mu.Lock()
-	defer mp.mu.Unlock()
-
-	for _, tx := range minedTxs {
-		if !tx.IsCoinbase() {
-			delete(mp.transactions, tx.ID)
+	err := mp.db.Update(func(bTx *bbolt.Tx) error {
+		b := bTx.Bucket([]byte(mempoolBucket))
+		for _, tx := range minedTxs {
+			if !tx.IsCoinbase() {
+				_ = b.Delete([]byte(tx.ID))
+			}
 		}
+		return nil
+	})
+	if err != nil {
+		log.Panic(err)
 	}
 }
 
-// Size returns the number of pending transactions in the mempool.
+// Size returns the total count of pending transactions in the mempool database.
 func (mp *Mempool) Size() int {
-	mp.mu.Lock()
-	defer mp.mu.Unlock()
-	return len(mp.transactions)
+	size := 0
+	_ = mp.db.View(func(bTx *bbolt.Tx) error {
+		b := bTx.Bucket([]byte(mempoolBucket))
+		size = b.Stats().KeyN
+		return nil
+	})
+	return size
 }
