@@ -27,10 +27,12 @@ import (
 
 // Constants defining core blockchain operational parameters.
 const (
-	dbFile        = "blockchain.db"
-	blocksBucket  = "blocks"
-	Subsidy       = 50 // Block reward subsidy in coins
-	BlockInterval = 10 // Interval blocks for dynamic difficulty adjustments
+	dbFile            = "blockchain.db"
+	blocksBucket      = "blocks"
+	Subsidy           = 50  // Block reward subsidy in coins
+	BlockInterval     = 5   // Interval blocks for dynamic difficulty adjustments (set to 5 for quick demo)
+	BlockTargetTime   = 60  // Target time in seconds for mining a block interval
+	InitialDifficulty = 12  // Starting difficulty
 )
 
 // ================= STRUCT DEFINITIONS =================
@@ -296,7 +298,7 @@ func CreateBlockchain(address string) *Blockchain {
 		}
 		tip = []byte(genesis.Hash)
 		return nil
-	})
+	}
 	if err != nil {
 		log.Panic(err)
 	}
@@ -311,9 +313,9 @@ func CreateGenesisBlock(coinbase *Transaction) *Block {
 		Transactions:  []*Transaction{coinbase},
 		PrevBlockHash: "0000000000000000000000000000000000000000000000000000000000000000",
 		Height:        0,
-		Difficulty:    12,
+		Difficulty:    InitialDifficulty,
 	}
-	pow := NewProofOfWork(block)
+	pow := NewProofOfWork(block}
 	nonce, hash := pow.Run()
 	block.Nonce = nonce
 	block.Hash = hash
@@ -498,26 +500,76 @@ func NewUTXOTransaction(walletSender *wallet.Wallet, recipient string, amount in
 	tx := Transaction{ID: "", Vin: inputs, Vout: outputs}
 	tx.ID = tx.Hash()
 	
-	// Sign the transaction using the sender's wallet credentials
 	tx.Sign(walletSender, prevTxs)
 
 	return &tx, nil
 }
 
+// CalculateDifficulty dynamically adjusts mining difficulty based on block intervals.
+func (bc *Blockchain) CalculateDifficulty(lastBlock *Block) int {
+	// Only adjust difficulty every `BlockInterval` blocks
+	if lastBlock.Height == 0 || lastBlock.Height%BlockInterval != 0 {
+		return lastBlock.Difficulty
+	}
+
+	// Find the checkpoint block from `BlockInterval` blocks ago
+	var prevAdjustmentBlock *Block
+	bc.Db.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte(blocksBucket))
+		cursor := b.Cursor()
+		
+		targetHeight := lastBlock.Height - BlockInterval
+		for k, v := cursor.First(); k != nil; k, v = cursor.Next() {
+			if string(k) == "l" {
+				continue
+			}
+			block := deserializeBlock(v)
+			if block.Height == targetHeight {
+				prevAdjustmentBlock = block
+				break
+			}
+		}
+		return nil
+	})
+
+	if prevAdjustmentBlock == nil {
+		return lastBlock.Difficulty
+	}
+
+	actualTimeSpan := lastBlock.Timestamp - prevAdjustmentBlock.Timestamp
+	targetTimeSpan := int64(BlockInterval * BlockTargetTime)
+
+	fmt.Printf("[Difficulty Adjustment] Actual time for last %d blocks: %ds (Target: %ds)\n", 
+		BlockInterval, actualTimeSpan, targetTimeSpan)
+
+	// Adjust difficulty limits to avoid wild swings
+	if actualTimeSpan < targetTimeSpan/2 {
+		fmt.Println("[Difficulty Adjustment] Mining too fast! Increasing difficulty.")
+		return lastBlock.Difficulty + 1
+	} else if actualTimeSpan > targetTimeSpan*2 {
+		fmt.Println("[Difficulty Adjustment] Mining too slow! Decreasing difficulty.")
+		if lastBlock.Difficulty > 1 {
+			return lastBlock.Difficulty - 1
+		}
+	}
+
+	return lastBlock.Difficulty
+}
+
 // MineBlock packs pending mempool transactions, runs PoW consensus, and appends the new block into storage.
 func (bc *Blockchain) MineBlock(transactions []*Transaction, minerAddress string) *Block {
 	var lastHash []byte
-	var lastHeight int
-	var difficulty = 12
+	var lastBlock *Block
 
 	bc.Db.View(func(tx *bbolt.Tx) error {
 		b := tx.Bucket([]byte(blocksBucket))
 		lastHash = b.Get([]byte("l"))
-		block := deserializeBlock(b.Get(lastHash))
-		lastHeight = block.Height
-		difficulty = block.Difficulty
+		lastBlock = deserializeBlock(b.Get(lastHash))
 		return nil
 	})
+
+	// Calculate new target difficulty dynamically
+	newDifficulty := bc.CalculateDifficulty(lastBlock)
 
 	var validTransactions []*Transaction
 	prevTxs := make(map[string]*Transaction)
@@ -556,8 +608,8 @@ func (bc *Blockchain) MineBlock(transactions []*Transaction, minerAddress string
 		Timestamp:     time.Now().Unix(),
 		Transactions:  allTransactions,
 		PrevBlockHash: hex.EncodeToString(lastHash),
-		Height:        lastHeight + 1,
-		Difficulty:    difficulty,
+		Height:        lastBlock.Height + 1,
+		Difficulty:    newDifficulty,
 	}
 
 	pow := NewProofOfWork(newBlock)
@@ -601,19 +653,16 @@ func StartP2PServer(port string) {
 // ================= MAIN EXECUTION ENTRYPOINT =================
 
 func main() {
-	fmt.Println("Starting Advanced PoW Blockchain (BoltDB + ECDSA Signature + P2P + Mempool)...")
+	fmt.Println("Starting Advanced PoW Blockchain with Dynamic Difficulty...")
 
-	// Start local P2P networking server daemon in a separate goroutine thread
 	go StartP2PServer("3000")
 
-	// Generate independent cryptographic keypair wallets for participants
 	walletDev := wallet.NewWallet()
 	walletUser := wallet.NewWallet()
 
 	minerAddress := walletDev.GetAddress()
 	userAddress := walletUser.GetAddress()
 
-	// Initialize the blockchain database structure with the miner's address
 	bc := CreateBlockchain(minerAddress)
 	defer bc.Db.Close()
 
@@ -622,27 +671,23 @@ func main() {
 	fmt.Printf("User Wallet Address : %s\n", userAddress)
 	fmt.Printf("Balance of Dev      : %d coins\n\n", bc.GetBalance(minerAddress))
 
-	// Execute Mining for Block 1 (Dev reward payout)
 	fmt.Println("--- Mining Block 1 (Reward to Dev) ---")
 	bc.MineBlock([]*Transaction{}, minerAddress)
 	fmt.Printf("Balance of Dev after Block 1: %d coins\n\n", bc.GetBalance(minerAddress))
 
-	// Execute Value Transfer Transaction from Developer to User
 	fmt.Println("--- Executing Secure Value Transfer: Dev sends 20 coins to User ---")
 	tx, err := NewUTXOTransaction(walletDev, userAddress, 20, bc)
 	if err != nil {
-		fmt.Printf("Transaction note: %v (Using standard mempool relay)\n", err)
+		fmt.Printf("Transaction note: %v\n", err)
 	} else {
 		mempool.Add(tx)
 	}
 
-	// Create and register an auxiliary payload transaction into the mempool
 	dummyTx := NewCoinbaseTX(userAddress, "Mempool Sync Payload")
 	mempool.Add(dummyTx)
 
 	fmt.Printf("[Mempool] Transactions added! Pending pool size: %d\n\n", mempool.Size())
 
-	// Pack pending mempool transactions into Block 2
 	fmt.Println("--- Mining Block 2 (Packing Transactions from Mempool) ---")
 	bc.MineBlock(mempool.GetAll(), minerAddress)
 
@@ -650,7 +695,6 @@ func main() {
 	fmt.Printf("Balance of Dev  (After Block 2 mined): %d coins\n", bc.GetBalance(minerAddress))
 	fmt.Printf("Balance of User (After Block 2 mined): %d coins\n", bc.GetBalance(userAddress))
 
-	// Print complete chain summary iterated directly from persistent storage
 	fmt.Println("--- Blockchain Chain Information Summary ---")
 	bc.Db.View(func(tx *bbolt.Tx) error {
 		b := tx.Bucket([]byte(blocksBucket))
@@ -661,6 +705,7 @@ func main() {
 			}
 			block := deserializeBlock(v)
 			fmt.Printf("Block Height : %d\n", block.Height)
+			fmt.Printf("Difficulty   : %d\n", block.Difficulty)
 			fmt.Printf("Prev. Hash   : %s\n", block.PrevBlockHash)
 			fmt.Printf("Block Hash   : %s\n", block.Hash)
 			fmt.Printf("Nonce        : %d\n", block.Nonce)
