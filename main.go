@@ -162,11 +162,9 @@ func (tx *Transaction) IsCoinbase() bool {
 func (tx *Transaction) TrimmedCopy() Transaction {
 	var inputs []TXInput
 	var outputs []TXOutput
-	// Iterate and copy inputs without signature or public key data
 	for _, vin := range tx.Vin {
 		inputs = append(inputs, TXInput{vin.Txid, vin.Vout, nil, nil})
 	}
-	// Iterate and copy outputs
 	for _, vout := range tx.Vout {
 		outputs = append(outputs, TXOutput{vout.Value, vout.ScriptPubKey})
 	}
@@ -175,21 +173,18 @@ func (tx *Transaction) TrimmedCopy() Transaction {
 
 // Sign signs each input of a transaction using the owner's private key credentials.
 func (tx *Transaction) Sign(w *wallet.Wallet, prevTxs map[string]*Transaction) {
-	// Skip signing if it's a coinbase transaction
 	if tx.IsCoinbase() {
 		return
 	}
 
 	txCopy := tx.TrimmedCopy()
 
-	// Loop through each input to apply cryptographic signature
 	for inID, vin := range tx.Vin {
 		prevTx := prevTxs[vin.Txid]
 		txCopy.Vin[inID].PubKey = []byte(prevTx.Vout[vin.Vout].ScriptPubKey)
 		txCopy.ID = txCopy.Hash()
 		txCopy.Vin[inID].PubKey = nil
 
-		// Generate signature over the trimmed transaction hash
 		signature := w.Sign([]byte(txCopy.ID))
 		tx.Vin[inID].Signature = signature
 		tx.Vin[inID].PubKey = w.PublicKey
@@ -198,21 +193,18 @@ func (tx *Transaction) Sign(w *wallet.Wallet, prevTxs map[string]*Transaction) {
 
 // Verify validates the cryptographic digital signature attached to each transaction input.
 func (tx *Transaction) Verify(prevTxs map[string]*Transaction) bool {
-	// Coinbase transactions do not require input verification
 	if tx.IsCoinbase() {
 		return true
 	}
 
 	txCopy := tx.TrimmedCopy()
 
-	// Loop through inputs to verify digital signatures against public keys
 	for inID, vin := range tx.Vin {
 		prevTx := prevTxs[vin.Txid]
 		txCopy.Vin[inID].PubKey = []byte(prevTx.Vout[vin.Vout].ScriptPubKey)
 		txCopy.ID = txCopy.Hash()
 		txCopy.Vin[inID].PubKey = nil
 
-		// Perform signature verification check via wallet utility
 		if !wallet.Verify(vin.PubKey, vin.Signature, []byte(txCopy.ID)) {
 			return false
 		}
@@ -225,7 +217,6 @@ func (tx *Transaction) Verify(prevTxs map[string]*Transaction) bool {
 // NewProofOfWork initializes and returns a PoW mining target structure for a target block.
 func NewProofOfWork(b *Block) *ProofOfWork {
 	target := big.NewInt(1)
-	// Left shift target value based on block difficulty level
 	target.Lsh(target, uint(256-b.Difficulty))
 	return &ProofOfWork{block: b, target: target}
 }
@@ -233,13 +224,11 @@ func NewProofOfWork(b *Block) *ProofOfWork {
 // prepareData flattens block components and headers into a contiguous byte stream for hashing.
 func (pow *ProofOfWork) prepareData(nonce int) []byte {
 	var txHashes [][]byte
-	// Extract transaction IDs for cryptographic merging
 	for _, tx := range pow.block.Transactions {
 		txHashes = append(txHashes, []byte(tx.ID))
 	}
 	txHash := sha256.Sum256(bytes.Join(txHashes, []byte{}))
 
-	// Combine header elements into a single byte array
 	data := bytes.Join(
 		[][]byte{
 			[]byte(pow.block.PrevBlockHash),
@@ -260,13 +249,11 @@ func (pow *ProofOfWork) Run() (int, string) {
 	nonce := 0
 
 	fmt.Printf("[PoW] Mining block at height %d (Difficulty: %d)...\n", pow.block.Height, pow.block.Difficulty)
-	// Iterate until maximum integer limit trying different nonce values
 	for nonce < math.MaxInt64 {
 		data := pow.prepareData(nonce)
 		hash = HashKeccak256(data)
 		hashInt.SetString(hash, 16)
 
-		// Check if computed hash is below the strict target threshold criteria
 		if hashInt.Cmp(pow.target) == -1 {
 			break
 		}
@@ -284,19 +271,16 @@ func intToHex(n int64) []byte {
 
 // CreateBlockchain initializes a fresh persistent BoltDB database and writes the Genesis block.
 func CreateBlockchain(address string) *Blockchain {
-	// Remove old database file if it already exists on disk
 	if _, err := os.Stat(dbFile); err == nil {
 		_ = os.Remove(dbFile)
 	}
 
-	// Open BoltDB database connection instance
 	db, err := bbolt.Open(dbFile, 0600, nil)
 	if err != nil {
 		log.Panic(err)
 	}
 
 	var tip []byte
-	// Update database to create bucket and store genesis block
 	err = db.Update(func(tx *bbolt.Tx) error {
 		cbtx := NewCoinbaseTX(address, "Genesis Block - Initializing Network")
 		genesis := CreateGenesisBlock(cbtx)
@@ -304,12 +288,10 @@ func CreateBlockchain(address string) *Blockchain {
 		if err != nil {
 			return err
 		}
-		// Put genesis block data serialized by hash key
 		err = b.Put([]byte(genesis.Hash), serializeBlock(genesis))
 		if err != nil {
 			return err
 		}
-		// Store database tip pointer reference key "l"
 		err = b.Put([]byte("l"), []byte(genesis.Hash))
 		if err != nil {
 			return err
@@ -326,20 +308,17 @@ func CreateBlockchain(address string) *Blockchain {
 
 // OpenBlockchain opens an existing BoltDB database instance for ongoing blockchain operations.
 func OpenBlockchain() *Blockchain {
-	// Check if database file exists before opening
 	if _, err := os.Stat(dbFile); os.IsNotExist(err) {
 		fmt.Println("No existing blockchain found. Create one using 'createblockchain -address <address>' first.")
 		os.Exit(1)
 	}
 
-	// Open connection to existing database file
 	db, err := bbolt.Open(dbFile, 0600, nil)
 	if err != nil {
 		log.Panic(err)
 	}
 
 	var tip []byte
-	// Read tip hash from database view transaction
 	err = db.View(func(tx *bbolt.Tx) error {
 		b := tx.Bucket([]byte(blocksBucket))
 		tip = b.Get([]byte("l"))
@@ -401,7 +380,6 @@ func (bc *Blockchain) FindUnspentTransactions(address string) []Transaction {
 	var unspentTXs []Transaction
 	spentTXos := make(map[string][]int)
 
-	// View database blocks using cursor traversal
 	bc.Db.View(func(tx *bbolt.Tx) error {
 		b := tx.Bucket([]byte(blocksBucket))
 		cursor := b.Cursor()
@@ -416,7 +394,6 @@ func (bc *Blockchain) FindUnspentTransactions(address string) []Transaction {
 				txID := tx.ID
 
 				for outIdx, out := range tx.Vout {
-					// Check if output has already been spent in later transactions
 					if spentTXos[txID] != nil {
 						spent := false
 						for _, spentOut := range spentTXos[txID] {
@@ -430,13 +407,11 @@ func (bc *Blockchain) FindUnspentTransactions(address string) []Transaction {
 						}
 					}
 
-					// Append to unspent list if output matches address
 					if out.ScriptPubKey == address {
 						unspentTXs = append(unspentTXs, *tx)
 					}
 				}
 
-				// Track spent inputs if transaction is not a coinbase
 				if !tx.IsCoinbase() {
 					for _, in := range tx.Vin {
 						if wallet.GetAddressFromPubKey(in.PubKey) == address {
@@ -466,7 +441,6 @@ Work:
 				accumulated += out.Value
 				unspentOutputs[txID] = append(unspentOutputs[txID], outIdx)
 
-				// Break loop once requested amount is accumulated
 				if accumulated >= amount {
 					break Work
 				}
@@ -481,7 +455,6 @@ func (bc *Blockchain) GetBalance(address string) int {
 	unspentTXs := bc.FindUnspentTransactions(address)
 	balance := 0
 
-	// Sum up all values from unspent transaction outputs matching address
 	for _, tx := range unspentTXs {
 		for _, out := range tx.Vout {
 			if out.ScriptPubKey == address {
@@ -504,7 +477,6 @@ func (bc *Blockchain) FindTransactionByHash(ID string) (Transaction, error) {
 				continue
 			}
 			block := deserializeBlock(v)
-			// Search transactions inside block for matching ID
 			for _, t := range block.Transactions {
 				if t.ID == ID {
 					foundTx = *t
@@ -528,14 +500,12 @@ func NewUTXOTransaction(walletSender *wallet.Wallet, recipient string, amount in
 	sender := walletSender.GetAddress()
 	acc, validOutputs := bc.FindSpendableOutputs(sender, amount)
 
-	// Return error if sender has insufficient funds available
 	if acc < amount {
 		return nil, errors.New("error: insufficient funds")
 	}
 
 	prevTxs := make(map[string]*Transaction)
 
-	// Collect previous transactions required for signing inputs
 	for txid, outs := range validOutputs {
 		for _, outIdx := range outs {
 			tx, err := bc.FindTransactionByHash(txid)
@@ -547,7 +517,6 @@ func NewUTXOTransaction(walletSender *wallet.Wallet, recipient string, amount in
 		}
 	}
 
-	// Create output for recipient and change output for sender if necessary
 	outputs = append(outputs, TXOutput{Value: amount, ScriptPubKey: recipient})
 	if acc > amount {
 		outputs = append(outputs, TXOutput{Value: acc - amount, ScriptPubKey: sender})
@@ -562,7 +531,6 @@ func NewUTXOTransaction(walletSender *wallet.Wallet, recipient string, amount in
 
 // CalculateDifficulty dynamically adjusts mining difficulty based on block intervals.
 func (bc *Blockchain) CalculateDifficulty(lastBlock *Block) int {
-	// Only adjust difficulty every `BlockInterval` blocks
 	if lastBlock.Height == 0 || lastBlock.Height%BlockInterval != 0 {
 		return lastBlock.Difficulty
 	}
@@ -593,7 +561,6 @@ func (bc *Blockchain) CalculateDifficulty(lastBlock *Block) int {
 	actualTimeSpan := lastBlock.Timestamp - prevAdjustmentBlock.Timestamp
 	targetTimeSpan := int64(BlockInterval * BlockTargetTime)
 
-	// Increase or decrease difficulty depending on actual time taken vs target time
 	if actualTimeSpan < targetTimeSpan/2 {
 		return lastBlock.Difficulty + 1
 	} else if actualTimeSpan > targetTimeSpan*2 {
@@ -610,7 +577,6 @@ func (bc *Blockchain) MineBlock(transactions []*Transaction, minerAddress string
 	var lastHash []byte
 	var lastBlock *Block
 
-	// Retrieve last block hash and metadata from database
 	bc.Db.View(func(tx *bbolt.Tx) error {
 		b := tx.Bucket([]byte(blocksBucket))
 		lastHash = b.Get([]byte("l"))
@@ -618,13 +584,11 @@ func (bc *Blockchain) MineBlock(transactions []*Transaction, minerAddress string
 		return nil
 	})
 
-	// Calculate new target difficulty dynamically
 	newDifficulty := bc.CalculateDifficulty(lastBlock)
 
 	var validTransactions []*Transaction
 	prevTxs := make(map[string]*Transaction)
 
-	// Load previous transactions to verify unconfirmed transaction inputs
 	bc.Db.View(func(tx *bbolt.Tx) error {
 		b := tx.Bucket([]byte(blocksBucket))
 		cursor := b.Cursor()
@@ -640,7 +604,6 @@ func (bc *Blockchain) MineBlock(transactions []*Transaction, minerAddress string
 		return nil
 	})
 
-	// Validate transactions before packing them into the new block
 	for _, tx := range transactions {
 		if tx.IsCoinbase() {
 			validTransactions = append(validTransactions, tx)
@@ -651,7 +614,6 @@ func (bc *Blockchain) MineBlock(transactions []*Transaction, minerAddress string
 		}
 	}
 
-	// Create coinbase reward transaction for the miner
 	cbtx := NewCoinbaseTX(minerAddress, "")
 	allTransactions := append([]*Transaction{cbtx}, validTransactions...)
 
@@ -663,13 +625,11 @@ func (bc *Blockchain) MineBlock(transactions []*Transaction, minerAddress string
 		Difficulty:    newDifficulty,
 	}
 
-	// Run Proof-of-Work algorithm to mine the block
 	pow := NewProofOfWork(newBlock)
 	nonce, hash := pow.Run()
 	newBlock.Nonce = nonce
 	newBlock.Hash = hash
 
-	// Save newly mined block into BoltDB database storage
 	bc.Db.Update(func(tx *bbolt.Tx) error {
 		b := tx.Bucket([]byte(blocksBucket))
 		_ = b.Put([]byte(newBlock.Hash), serializeBlock(newBlock))
@@ -678,7 +638,6 @@ func (bc *Blockchain) MineBlock(transactions []*Transaction, minerAddress string
 		return nil
 	})
 
-	// Clear processed transactions from mempool
 	mempool.Clear(transactions)
 	return newBlock
 }
@@ -692,7 +651,6 @@ func StartP2PServer(port string) {
 		return
 	}
 	defer listen.Close()
-	// Accept incoming peer connections continuously in background loop
 	for {
 		conn, err := listen.Accept()
 		if err != nil {
@@ -713,11 +671,12 @@ type CLI struct{}
 // printUsage displays manual instructions for available terminal commands.
 func (cli *CLI) printUsage() {
 	fmt.Println("Usage:")
-	fmt.Println("  createblockchain -address <ADDRESS>    - Create a blockchain and send genesis reward")
-	fmt.Println("  createwallet                           - Generates a new wallet address")
-	fmt.Println("  getbalance -address <ADDRESS>          - Get balance of an address")
-	fmt.Println("  printchain                             - Print all blocks of the blockchain")
-	fmt.Println("  mine -miner <ADDRESS>                  - Mine a new block with pending mempool txs")
+	fmt.Println("  createblockchain -address <ADDRESS>           - Create a blockchain and send genesis reward")
+	fmt.Println("  createwallet                                  - Generates a new wallet address")
+	fmt.Println("  getbalance -address <ADDRESS>                 - Get balance of an address")
+	fmt.Println("  printchain                                    - Print all blocks of the blockchain")
+	fmt.Println("  mine -miner <ADDRESS>                         - Mine a new block with pending mempool txs")
+	fmt.Println("  send -from <FROM> -to <TO> -amount <AMOUNT>   - Send coins from one address to another")
 }
 
 // validateArgs ensures command line execution contains proper argument lengths.
@@ -732,18 +691,21 @@ func (cli *CLI) validateArgs() {
 func (cli *CLI) Run() {
 	cli.validateArgs()
 
-	// Initialize individual flag set command definitions
 	createBlockchainCmd := flag.NewFlagSet("createblockchain", flag.ExitOnError)
 	createWalletCmd := flag.NewFlagSet("createwallet", flag.ExitOnError)
 	getBalanceCmd := flag.NewFlagSet("getbalance", flag.ExitOnError)
 	printChainCmd := flag.NewFlagSet("printchain", flag.ExitOnError)
 	mineCmd := flag.NewFlagSet("mine", flag.ExitOnError)
+	sendCmd := flag.NewFlagSet("send", flag.ExitOnError)
 
 	createBlockchainAddress := createBlockchainCmd.String("address", "", "The address to send genesis block reward to")
 	getBalanceAddress := getBalanceCmd.String("address", "", "The address to get balance for")
 	mineMinerAddress := mineCmd.String("miner", "", "Miner address to receive block reward")
+	
+	sendFrom := sendCmd.String("from", "", "Source wallet address")
+	sendTo := sendCmd.String("to", "", "Destination recipient address")
+	sendAmount := sendCmd.Int("amount", 0, "Amount of coins to send")
 
-	// Switch statement to evaluate command argument category
 	switch os.Args[1] {
 	case "createblockchain":
 		_ = createBlockchainCmd.Parse(os.Args[2:])
@@ -755,12 +717,13 @@ func (cli *CLI) Run() {
 		_ = printChainCmd.Parse(os.Args[2:])
 	case "mine":
 		_ = mineCmd.Parse(os.Args[2:])
+	case "send":
+		_ = sendCmd.Parse(os.Args[2:])
 	default:
 		cli.printUsage()
 		os.Exit(1)
 	}
 
-	// Handle execution for createblockchain command
 	if createBlockchainCmd.Parsed() {
 		if *createBlockchainAddress == "" {
 			createBlockchainCmd.Usage()
@@ -771,13 +734,11 @@ func (cli *CLI) Run() {
 		fmt.Println("Done! Genesis block created.")
 	}
 
-	// Handle execution for createwallet command
 	if createWalletCmd.Parsed() {
 		w := wallet.NewWallet()
 		fmt.Printf("New Wallet Generated!\nAddress: %s\n", w.GetAddress())
 	}
 
-	// Handle execution for getbalance command
 	if getBalanceCmd.Parsed() {
 		if *getBalanceAddress == "" {
 			getBalanceCmd.Usage()
@@ -789,12 +750,10 @@ func (cli *CLI) Run() {
 		fmt.Printf("Balance of '%s': %d coins\n", *getBalanceAddress, balance)
 	}
 
-	// Handle execution for printchain command
 	if printChainCmd.Parsed() {
 		bc := OpenBlockchain()
 		defer bc.Db.Close()
 
-		// View block items stored inside BoltDB bucket via cursor iteration
 		bc.Db.View(func(tx *bbolt.Tx) error {
 			b := tx.Bucket([]byte(blocksBucket))
 			cursor := b.Cursor()
@@ -815,7 +774,6 @@ func (cli *CLI) Run() {
 		})
 	}
 
-	// Handle execution for mine command
 	if mineCmd.Parsed() {
 		if *mineMinerAddress == "" {
 			mineCmd.Usage()
@@ -826,11 +784,33 @@ func (cli *CLI) Run() {
 		bc.MineBlock(mempool.GetAll(), *mineMinerAddress)
 		fmt.Println("Success! Block mined.")
 	}
+
+	if sendCmd.Parsed() {
+		if *sendFrom == "" || *sendTo == "" || *sendAmount <= 0 {
+			sendCmd.Usage()
+			os.Exit(1)
+		}
+
+		bc := OpenBlockchain()
+		defer bc.Db.Close()
+
+		w, err := wallet.GetWalletByAddress(*sendFrom)
+		if err != nil {
+			log.Fatalf("Failed to load sender wallet: %v", err)
+		}
+
+		tx, err := NewUTXOTransaction(w, *sendTo, *sendAmount, bc)
+		if err != nil {
+			log.Fatalf("Transaction failed: %v", err)
+		}
+
+		mempool.Add(tx)
+		fmt.Println("Success! Transaction added to mempool.")
+	}
 }
 
 // main serves as the primary program execution entrypoint.
 func main() {
-	// Start lightweight background P2P listener server on port 3000
 	go StartP2PServer("3000")
 	cli := CLI{}
 	cli.Run()
