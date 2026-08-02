@@ -35,7 +35,7 @@ func NewWallet() *Wallet {
 	private, public := newKeyPair()
 	privBytes := private.D.Bytes()
 	w := &Wallet{PrivateKey: privBytes, PublicKey: public}
-	
+
 	ws, _ := LoadWallets()
 	ws.Wallets[w.GetAddress()] = w
 	ws.SaveFile()
@@ -106,13 +106,22 @@ func (w *Wallet) GetPrivateKey() *ecdsa.PrivateKey {
 	curve := elliptic.P256()
 	d := big.Int{}
 	d.SetBytes(w.PrivateKey)
+	
 	privKey := &ecdsa.PrivateKey{
 		PublicKey: ecdsa.PublicKey{
 			Curve: curve,
 		},
 		D: &d,
 	}
-	privKey.PublicKey.X, privKey.PublicKey.Y = curve.ScalarBaseMult(w.PrivateKey)
+
+	privKeyBytes := w.PrivateKey
+	if len(privKeyBytes) < 32 {
+		paddedBytes := make([]byte, 32)
+		copy(paddedBytes[32-len(privKeyBytes):], privKeyBytes)
+		privKeyBytes = paddedBytes
+	}
+
+	privKey.PublicKey.X, privKey.PublicKey.Y = curve.ScalarBaseMult(privKeyBytes)
 	return privKey
 }
 

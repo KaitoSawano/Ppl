@@ -1,3 +1,4 @@
+// Copyright 2026 The Aldianokto
 // Package main implements a robust, modular, and production-ready Proof-of-Work (PoW) 
 // blockchain core featuring BoltDB permanent storage, ECDSA digital signatures, 
 // a transaction mempool, adaptive difficulty, and a lightweight P2P networking layer.
@@ -19,6 +20,7 @@ import (
 	"math/big"
 	"net"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -29,12 +31,18 @@ import (
 // Constants defining core blockchain operational parameters.
 const (
 	dbFile            = "blockchain.db" // Database file name stored locally
+	mempoolFile       = "mempool.json"  // Persistent mempool backup file
 	blocksBucket      = "blocks"        // BoltDB bucket key for block storage
 	Subsidy           = 50              // Block reward subsidy in coins allocated per mined block
 	BlockInterval     = 5               // Interval blocks required for triggering dynamic difficulty adjustments
 	BlockTargetTime   = 60              // Target time in seconds defined for mining a block interval
 	InitialDifficulty = 12              // Starting mining difficulty bits threshold
+	LogDirName        = ".gnx"          // Directory name for debug logs
+	LogFileName       = "debug.log"     // Log file name
 )
+
+// Global logger file descriptor for multi-writer outputs.
+var logFile *os.File
 
 // ================= STRUCT DEFINITIONS =================
 
@@ -85,53 +93,119 @@ type ProofOfWork struct {
 // Mempool manages unconfirmed transactions waiting to be packed into newly mined blocks.
 type Mempool struct {
 	mu           sync.Mutex
-	transactions map[string]*Transaction
+	Transactions map[string]*Transaction
 }
 
 // Global mempool instance initialization for tracking unconfirmed transactions.
 var mempool = NewMempool()
 
-// ================= MEMPOOL MANAGEMENT =================
+// ================= LOGGING SYSTEM =================
 
-// NewMempool instantiates and returns a thread-safe transaction pool.
-func NewMempool() *Mempool {
-	return &Mempool{transactions: make(map[string]*Transaction)}
+// InitLogger sets up file and console dual-logging resembling Bitcoin Core debug.log.
+func InitLogger() {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		homeDir = "."
+	}
+
+	logDirPath := filepath.Join(homeDir, LogDirName)
+	if err := os.MkdirAll(logDirPath, 0755); err != nil {
+		logDirPath = "."
+	}
+
+	logPath := filepath.Join(logDirPath, LogFileName)
+	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		log.Printf("Failed to open debug log file: %v", err)
+		return
+	}
+	logFile = f
+
+	// MultiWriter routes logs simultaneously to stdout (terminal) and debug.log file
+	multiWriter := io.MultiWriter(os.Stdout, logFile)
+	log.SetOutput(multiWriter)
+	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
+	
+	log.Printf("[NODE] GNX Blockchain Core initialized. Logging to %s", logPath)
 }
 
-// Add safely inserts a new pending transaction into the mempool map using a mutex lock.
+// CloseLogger gracefully closes the debug log file handle.
+func CloseLogger() {
+	if logFile != nil {
+		_ = logFile.Close()
+	}
+}
+
+// ================= MEMPOOL MANAGEMENT =================
+
+// NewMempool instantiates and returns a thread-safe transaction pool loaded from disk.
+func NewMempool() *Mempool {
+	mp := &Mempool{Transactions: make(map[string]*Transaction)}
+	mp.loadFromFile()
+	return mp
+}
+
+// saveToFile persists current mempool transactions to a local JSON file.
+func (mp *Mempool) saveToFile() {
+	data, err := json.Marshal(mp.Transactions)
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(mempoolFile, data, 0644)
+}
+
+// loadFromFile reads pending transactions from the local JSON file.
+func (mp *Mempool) loadFromFile() {
+	if _, err := os.Stat(mempoolFile); os.IsNotExist(err) {
+		return
+	}
+	data, err := os.ReadFile(mempoolFile)
+	if err != nil {
+		return
+	}
+	_ = json.Unmarshal(data, &mp.Transactions)
+}
+
+// Add safely inserts a new pending transaction into the mempool and saves it to disk.
 func (mp *Mempool) Add(tx *Transaction) {
 	mp.mu.Lock()
 	defer mp.mu.Unlock()
-	mp.transactions[tx.ID] = tx
+	mp.Transactions[tx.ID] = tx
+	mp.saveToFile()
+	log.Printf("[MEMPOOL] Transaction added & saved to disk: %s", tx.ID)
 }
 
-// GetAll extracts and returns a slice of all currently pending transactions.
+// GetAll extracts and returns a slice of all currently pending transactions (refreshed from disk).
 func (mp *Mempool) GetAll() []*Transaction {
 	mp.mu.Lock()
 	defer mp.mu.Unlock()
+	mp.loadFromFile()
 	var txs []*Transaction
-	for _, tx := range mp.transactions {
+	for _, tx := range mp.Transactions {
 		txs = append(txs, tx)
 	}
 	return txs
 }
 
-// Clear purges successfully mined non-coinbase transactions from the mempool container.
+// Clear purges successfully mined non-coinbase transactions and updates the disk file.
 func (mp *Mempool) Clear(minedTxs []*Transaction) {
 	mp.mu.Lock()
 	defer mp.mu.Unlock()
 	for _, tx := range minedTxs {
 		if !tx.IsCoinbase() {
-			delete(mp.transactions, tx.ID)
+			delete(mp.Transactions, tx.ID)
+			log.Printf("[MEMPOOL] Cleared mined transaction: %s", tx.ID)
 		}
 	}
+	mp.saveToFile()
 }
 
 // Size returns the current count of pending transactions awaiting block confirmation.
 func (mp *Mempool) Size() int {
 	mp.mu.Lock()
 	defer mp.mu.Unlock()
-	return len(mp.transactions)
+	mp.loadFromFile()
+	return len(mp.Transactions)
 }
 
 // ================= CRYPTOGRAPHIC & UTILITY FUNCTIONS =================
@@ -248,7 +322,7 @@ func (pow *ProofOfWork) Run() (int, string) {
 	var hash string
 	nonce := 0
 
-	fmt.Printf("[PoW] Mining block at height %d (Difficulty: %d)...\n", pow.block.Height, pow.block.Difficulty)
+	log.Printf("[PoW] Starting mining computation at height %d (Difficulty: %d)...", pow.block.Height, pow.block.Difficulty)
 	for nonce < math.MaxInt64 {
 		data := pow.prepareData(nonce)
 		hash = HashKeccak256(data)
@@ -259,6 +333,7 @@ func (pow *ProofOfWork) Run() (int, string) {
 		}
 		nonce++
 	}
+	log.Printf("[PoW] Block successfully mined! Nonce: %d, Hash: %s", nonce, hash)
 	return nonce, hash
 }
 
@@ -303,13 +378,14 @@ func CreateBlockchain(address string) *Blockchain {
 		log.Panic(err)
 	}
 
+	log.Printf("[DB] New blockchain created with Genesis hash: %s", string(tip))
 	return &Blockchain{tip, db}
 }
 
 // OpenBlockchain opens an existing BoltDB database instance for ongoing blockchain operations.
 func OpenBlockchain() *Blockchain {
 	if _, err := os.Stat(dbFile); os.IsNotExist(err) {
-		fmt.Println("No existing blockchain found. Create one using 'createblockchain -address <address>' first.")
+		log.Println("[DB] Error: No existing blockchain found. Create one using 'createblockchain -address <address>' first.")
 		os.Exit(1)
 	}
 
@@ -375,7 +451,7 @@ func NewCoinbaseTX(to, data string) *Transaction {
 	return &tx
 }
 
-// FindUnspentTransactions scans historical blocks in the database to trace user UTXOs.
+// FindUnspentTransactions scans historical blocks in the database to trace user UTXOs accurately.
 func (bc *Blockchain) FindUnspentTransactions(address string) []Transaction {
 	var unspentTXs []Transaction
 	spentTXos := make(map[string][]int)
@@ -453,16 +529,50 @@ Work:
 // GetBalance calculates the total spendable balance for an account address.
 func (bc *Blockchain) GetBalance(address string) int {
 	unspentTXs := bc.FindUnspentTransactions(address)
-	balance := 0
+	
+	spentTXos := make(map[string][]int)
+	bc.Db.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte(blocksBucket))
+		cursor := b.Cursor()
+		for k, v := cursor.First(); k != nil; k, v = cursor.Next() {
+			if string(k) == "l" {
+				continue
+			}
+			block := deserializeBlock(v)
+			for _, t := range block.Transactions {
+				if !t.IsCoinbase() {
+					for _, in := range t.Vin {
+						if wallet.GetAddressFromPubKey(in.PubKey) == address {
+							spentTXos[in.Txid] = append(spentTXos[in.Txid], in.Vout)
+						}
+					}
+				}
+			}
+		}
+		return nil
+	})
 
+	exactBalance := 0
 	for _, tx := range unspentTXs {
-		for _, out := range tx.Vout {
+		txID := tx.ID
+		for outIdx, out := range tx.Vout {
 			if out.ScriptPubKey == address {
-				balance += out.Value
+				isSpent := false
+				if spentTXos[txID] != nil {
+					for _, spentOut := range spentTXos[txID] {
+						if spentOut == outIdx {
+							isSpent = true
+							break
+						}
+					}
+				}
+				if !isSpent {
+					exactBalance += out.Value
+				}
 			}
 		}
 	}
-	return balance
+	return exactBalance
 }
 
 // FindTransactionByHash searches and retrieves a specific transaction record structure by its ID.
@@ -501,6 +611,7 @@ func NewUTXOTransaction(walletSender *wallet.Wallet, recipient string, amount in
 	acc, validOutputs := bc.FindSpendableOutputs(sender, amount)
 
 	if acc < amount {
+		log.Printf("[TX] Insufficient funds for sender %s: have %d, need %d", sender, acc, amount)
 		return nil, errors.New("error: insufficient funds")
 	}
 
@@ -526,6 +637,7 @@ func NewUTXOTransaction(walletSender *wallet.Wallet, recipient string, amount in
 	tx.ID = tx.Hash()
 	tx.Sign(walletSender, prevTxs)
 
+	log.Printf("[TX] Created new UTXO transaction %s (Amount: %d coins)", tx.ID, amount)
 	return &tx, nil
 }
 
@@ -562,9 +674,11 @@ func (bc *Blockchain) CalculateDifficulty(lastBlock *Block) int {
 	targetTimeSpan := int64(BlockInterval * BlockTargetTime)
 
 	if actualTimeSpan < targetTimeSpan/2 {
+		log.Printf("[CONSENSUS] Difficulty increased: +1 (Height %d)", lastBlock.Height+1)
 		return lastBlock.Difficulty + 1
 	} else if actualTimeSpan > targetTimeSpan*2 {
 		if lastBlock.Difficulty > 1 {
+			log.Printf("[CONSENSUS] Difficulty decreased: -1 (Height %d)", lastBlock.Height+1)
 			return lastBlock.Difficulty - 1
 		}
 	}
@@ -611,6 +725,9 @@ func (bc *Blockchain) MineBlock(transactions []*Transaction, minerAddress string
 		}
 		if tx.Verify(prevTxs) {
 			validTransactions = append(validTransactions, tx)
+			log.Printf("[VALIDATION] STATUS: Transaction %s is valid and included in block.", tx.ID)
+		} else {
+			log.Printf("[VALIDATION] STATUS: TRANSACTION %s FAILED VERIFICATION (Signature/PrevTx mismatch)!", tx.ID)
 		}
 	}
 
@@ -638,6 +755,7 @@ func (bc *Blockchain) MineBlock(transactions []*Transaction, minerAddress string
 		return nil
 	})
 
+	log.Printf("[BLOCK] Appended new block #%d (Hash: %s) to blockchain storage.", newBlock.Height, newBlock.Hash)
 	mempool.Clear(transactions)
 	return newBlock
 }
@@ -648,9 +766,12 @@ func (bc *Blockchain) MineBlock(transactions []*Transaction, minerAddress string
 func StartP2PServer(port string) {
 	listen, err := net.Listen("tcp", ":"+port)
 	if err != nil {
+		log.Printf("[P2P] Failed to bind port %s: %v", port, err)
 		return
 	}
 	defer listen.Close()
+	log.Printf("[P2P] Node server listening on TCP port %s", port)
+
 	for {
 		conn, err := listen.Accept()
 		if err != nil {
@@ -671,7 +792,7 @@ type CLI struct{}
 // printUsage displays manual instructions for available terminal commands.
 func (cli *CLI) printUsage() {
 	fmt.Println("Usage:")
-	fmt.Println("  createblockchain -address <ADDRESS>           - Create a blockchain and send genesis reward")
+	fmt.Println("  createblockchain -address <ADDRESS>            - Create a blockchain and send genesis reward")
 	fmt.Println("  createwallet                                  - Generates a new wallet address")
 	fmt.Println("  getbalance -address <ADDRESS>                 - Get balance of an address")
 	fmt.Println("  printchain                                    - Print all blocks of the blockchain")
@@ -731,12 +852,12 @@ func (cli *CLI) Run() {
 		}
 		bc := CreateBlockchain(*createBlockchainAddress)
 		defer bc.Db.Close()
-		fmt.Println("Done! Genesis block created.")
+		log.Println("Done! Genesis block created successfully.")
 	}
 
 	if createWalletCmd.Parsed() {
 		w := wallet.NewWallet()
-		fmt.Printf("New Wallet Generated!\nAddress: %s\n", w.GetAddress())
+		log.Printf("New Wallet Generated!\nAddress: %s", w.GetAddress())
 	}
 
 	if getBalanceCmd.Parsed() {
@@ -747,7 +868,7 @@ func (cli *CLI) Run() {
 		bc := OpenBlockchain()
 		defer bc.Db.Close()
 		balance := bc.GetBalance(*getBalanceAddress)
-		fmt.Printf("Balance of '%s': %d coins\n", *getBalanceAddress, balance)
+		log.Printf("Balance of '%s': %d coins", *getBalanceAddress, balance)
 	}
 
 	if printChainCmd.Parsed() {
@@ -762,13 +883,13 @@ func (cli *CLI) Run() {
 					continue
 				}
 				block := deserializeBlock(v)
-				fmt.Printf("Block Height : %d\n", block.Height)
-				fmt.Printf("Difficulty   : %d\n", block.Difficulty)
-				fmt.Printf("Prev. Hash   : %s\n", block.PrevBlockHash)
-				fmt.Printf("Block Hash   : %s\n", block.Hash)
-				fmt.Printf("Nonce        : %d\n", block.Nonce)
-				fmt.Printf("Tx Count     : %d\n", len(block.Transactions))
-				fmt.Println("--------------------------------------------------")
+				log.Printf("Block Height : %d", block.Height)
+				log.Printf("Difficulty   : %d", block.Difficulty)
+				log.Printf("Prev. Hash   : %s", block.PrevBlockHash)
+				log.Printf("Block Hash   : %s", block.Hash)
+				log.Printf("Nonce        : %d", block.Nonce)
+				log.Printf("Tx Count     : %d", len(block.Transactions))
+				log.Println("--------------------------------------------------")
 			}
 			return nil
 		})
@@ -782,7 +903,7 @@ func (cli *CLI) Run() {
 		bc := OpenBlockchain()
 		defer bc.Db.Close()
 		bc.MineBlock(mempool.GetAll(), *mineMinerAddress)
-		fmt.Println("Success! Block mined.")
+		log.Println("Success! Block successfully mined and committed.")
 	}
 
 	if sendCmd.Parsed() {
@@ -805,12 +926,15 @@ func (cli *CLI) Run() {
 		}
 
 		mempool.Add(tx)
-		fmt.Println("Success! Transaction added to mempool.")
+		log.Println("Success! Transaction broadcasted and added to mempool.")
 	}
 }
 
 // main serves as the primary program execution entrypoint.
 func main() {
+	InitLogger()
+	defer CloseLogger()
+
 	go StartP2PServer("3000")
 	cli := CLI{}
 	cli.Run()
