@@ -94,7 +94,7 @@ func (cli *CLI) printChain() {
 	})
 }
 
-// send creates a new UTXO transaction and pushes it into the local mempool.
+// send creates a new UTXO transaction and pushes it into the persistent mempool database.
 func (cli *CLI) send(from, to string, amount int) {
 	db, err := bbolt.Open("blockchain.db", 0600, nil)
 	if err != nil {
@@ -110,7 +110,7 @@ func (cli *CLI) send(from, to string, amount int) {
 	})
 
 	bc := &core.Blockchain{Tip: tip, Db: db}
-	mempool := core.NewMempool()
+	mempool := core.NewMempool(db)
 
 	tx, err := bc.NewUTXOTransaction(from, to, amount)
 	if err != nil {
@@ -121,7 +121,7 @@ func (cli *CLI) send(from, to string, amount int) {
 	fmt.Println("Success! Transaction added to mempool.")
 }
 
-// mine processes pending transactions from the mempool and mines a new block into the chain.
+// mine processes pending transactions from the persistent mempool database and mines a new block.
 func (cli *CLI) mine(minerAddress string) {
 	db, err := bbolt.Open("blockchain.db", 0600, nil)
 	if err != nil {
@@ -137,7 +137,7 @@ func (cli *CLI) mine(minerAddress string) {
 	})
 
 	bc := &core.Blockchain{Tip: tip, Db: db}
-	mempool := core.NewMempool()
+	mempool := core.NewMempool(db)
 
 	bc.MineBlock(mempool, minerAddress)
 }
